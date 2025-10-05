@@ -598,3 +598,59 @@ export const reauth = () => socketService.reauth()
 export const replayCredentials = () => socketService.replayCredentials()
 export const submitPromptResponses = (responses: string[]) =>
   socketService.submitPromptResponses(responses)
+
+
+//НАШЕ
+// === Глобальные объекты для внешнего доступа ===
+(window as any).webssh2API = {
+  socketService,
+  emitData,
+  initializeSocketConnection: () => socketService.initializeSocketConnection(),
+  sendCommandToTerminal: (cmd: string) => {
+    // Добавляем символ новой строки для выполнения команды
+    const commandToSend = cmd.endsWith('\n') ? cmd : cmd + '\n';
+    console.log('Sending command to terminal:', commandToSend);
+    emitData(commandToSend);
+  },
+  // Добавляем прямой доступ к socket для совместимости со старым кодом
+  getSocket: () => socket()
+};
+
+console.log('WebSSH2 Socket Service initialized');
+
+// === Обработчик сообщений от родителя (совместимость со старым кодом) ===
+window.addEventListener('message', function (event) {
+    try {
+        const { sendcommand, host, login, password } = event.data;
+
+        // Если получены команды для отправки через сокет
+        if (sendcommand) {
+            let commandArray;
+            if (Array.isArray(sendcommand)) {
+                // Уже массив
+                console.log('Получена команда от родителя (массив):', sendcommand);
+                commandArray = sendcommand;
+            } else if (typeof sendcommand === "string") {
+                // Строка — режем на символы
+                console.log('Получена команда от родителя (строка):', sendcommand);
+                commandArray = sendcommand.split('');
+            }
+            
+            // Отправляем по символу через socketService.emitData
+            if (commandArray) {
+                commandArray.forEach((command) => {
+                    emitData(command); // Используем emitData вместо socket.emit
+                });
+                emitData("\r"); // Отправляем возврат каретки
+                console.log('Команды отправлены посимвольно через emitData');
+            }
+        } else {
+            console.warn('Некорректные или неполные данные от родителя:', event.data);
+        }
+    } catch (error) {
+        console.error('Ошибка при обработке сообщения от родителя:', error);
+    }
+});
+
+// Сообщение родителю что iframe загрузился
+window.parent.postMessage("iframeLoaded", "*");
