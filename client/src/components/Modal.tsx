@@ -9,6 +9,10 @@ import {
 } from 'solid-js'
 import { Portal } from 'solid-js/web'
 import createDebug from 'debug'
+import { shouldCaptureKey } from '../utils/keyboard-capture'
+import { getStoredSettings } from '../utils/settings'
+import { defaultSettings } from '../utils/index'
+import type { TerminalSettings } from '../types/config.d'
 
 const debug = createDebug('webssh2-client:modal')
 
@@ -59,6 +63,16 @@ export const Modal: Component<ModalProps> = (props) => {
   // Handle keyboard events
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Escape' && props.isOpen) {
+      // Check if Escape should be captured by the terminal
+      const storedSettings = getStoredSettings() as Partial<TerminalSettings>
+      const keyboardCaptureSettings =
+        storedSettings.keyboardCapture || defaultSettings.keyboardCapture
+
+      if (shouldCaptureKey(e, keyboardCaptureSettings)) {
+        // Escape should be captured by terminal, don't close modal
+        return
+      }
+
       props.onClose()
     }
   }
@@ -93,16 +107,17 @@ export const Modal: Component<ModalProps> = (props) => {
           ref={dialogRef}
           class={`fixed inset-0 z-50 flex items-center justify-center bg-black/50 ${props.class || ''}`}
           onClick={handleDialogClick}
+          aria-modal="true"
         >
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onClick={(e) => e.stopPropagation()} role="document">
             <Show when={props.showCloseButton !== false}>
               <button
                 type="button"
                 class="absolute right-2 top-2 border-0 bg-transparent p-0 text-xl leading-none text-neutral-400 hover:text-neutral-600"
                 onClick={props.onClose}
-                aria-label="Close"
+                aria-label="Close dialog"
               >
-                &times;
+                <span aria-hidden="true">&times;</span>
               </button>
             </Show>
             {props.children}
@@ -123,9 +138,21 @@ interface ErrorModalProps {
 export const ErrorModal: Component<ErrorModalProps> = (props) => {
   return (
     <Modal isOpen={props.isOpen} onClose={props.onClose}>
-      <div class="relative w-80 rounded-md border border-red-400 bg-red-50 p-5 shadow-md sm:w-96">
-        <h2 class="mb-3 text-lg font-semibold text-red-700">Error</h2>
-        <p class="mb-4 text-red-600">{props.message}</p>
+      <div
+        class="relative w-80 rounded-md border border-red-400 bg-red-50 p-5 shadow-md sm:w-96"
+        role="alertdialog"
+        aria-labelledby="error-modal-title"
+        aria-describedby="error-modal-message"
+      >
+        <h2
+          id="error-modal-title"
+          class="mb-3 text-lg font-semibold text-red-700"
+        >
+          Error
+        </h2>
+        <p id="error-modal-message" class="mb-4 text-red-600">
+          {props.message}
+        </p>
         <div class="flex justify-end">
           <button
             type="button"
@@ -174,27 +201,44 @@ export const PromptModal: Component<PromptModalProps> = (props) => {
 
   return (
     <Modal isOpen={props.isOpen} onClose={props.onClose}>
-      <div class="relative w-80 rounded-md border border-neutral-300 bg-white p-5 text-slate-800 shadow-md sm:w-96">
-        <h2 class="mb-4 text-lg font-semibold text-slate-900">{props.title}</h2>
-        <form onSubmit={handleSubmit}>
+      <div
+        class="relative w-80 rounded-md border border-neutral-300 bg-white p-5 text-slate-800 shadow-md sm:w-96"
+        role="dialog"
+        aria-labelledby="prompt-modal-title"
+      >
+        <h2
+          id="prompt-modal-title"
+          class="mb-4 text-lg font-semibold text-slate-900"
+        >
+          {props.title}
+        </h2>
+        <form onSubmit={handleSubmit} aria-label="Authentication prompts">
           <div class="mb-4 space-y-3">
             <For each={props.prompts}>
-              {(prompt, index) => (
-                <div>
-                  <label class="mb-1 block text-sm font-medium text-slate-700">
-                    {prompt.prompt}
-                  </label>
-                  <input
-                    type={prompt.echo ? 'text' : 'password'}
-                    class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    value={responses()[index()] || ''}
-                    onInput={(e) =>
-                      handleInputChange(index(), e.currentTarget.value)
-                    }
-                    required
-                  />
-                </div>
-              )}
+              {(prompt, index) => {
+                const inputId = `prompt-input-${index()}`
+                return (
+                  <div>
+                    <label
+                      for={inputId}
+                      class="mb-1 block text-sm font-medium text-slate-700"
+                    >
+                      {prompt.prompt}
+                    </label>
+                    <input
+                      id={inputId}
+                      type={prompt.echo ? 'text' : 'password'}
+                      class="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={responses()[index()] || ''}
+                      onInput={(e) =>
+                        handleInputChange(index(), e.currentTarget.value)
+                      }
+                      required
+                      aria-required="true"
+                    />
+                  </div>
+                )
+              }}
             </For>
           </div>
           <div class="flex justify-end gap-2">

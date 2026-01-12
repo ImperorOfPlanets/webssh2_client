@@ -30,7 +30,21 @@ export const defaultSettings: TerminalSettings = {
   logLevel: 'info',
   clipboardAutoSelectToCopy: true,
   clipboardEnableMiddleClickPaste: true,
-  clipboardEnableKeyboardShortcuts: true
+  clipboardEnableKeyboardShortcuts: true,
+  keyboardCapture: {
+    captureEscape: false,
+    captureCtrlB: false,
+    customCaptureKeys: []
+  },
+  promptSounds: {
+    enabled: false,
+    severities: {
+      info: true,
+      warning: true,
+      error: true,
+      success: true
+    }
+  }
 }
 
 export function validateNumber(

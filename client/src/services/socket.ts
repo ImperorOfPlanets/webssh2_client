@@ -19,7 +19,7 @@ import {
 } from '../stores/terminal.js'
 
 // Import utilities
-import { credentials } from '../stores/config.js'
+import { credentials, sanitizeClientAuthPayload } from '../stores/config.js'
 import { createDebouncedResizeEmitter } from '../utils/terminalResize.js'
 import {
   RESIZE_DEBOUNCE_DELAY,
@@ -33,10 +33,21 @@ import type {
   ClientResizePayload,
   ClientToServerEvents,
   ServerToClientEvents,
-  PermissionsPayload
+  PermissionsPayload,
+  PromptPayload,
+  PromptResponsePayload
 } from '../types/events.d'
 import type { WebSSH2Config } from '../types/config.d'
+
+// Import prompt store
+import { promptStore } from '../stores/prompt-store.js'
 // import type { ElementId } from '../../types/dom.d'
+
+declare global {
+  interface Window {
+    webssh2Socket?: Socket<ServerToClientEvents, ClientToServerEvents>
+  }
+}
 
 const debug = createDebug('webssh2-client:socket-service')
 
@@ -135,13 +146,18 @@ export class SocketService {
     onDataCallback = dataCallback
     writeToTerminal = writeFunction
     focusTerminalCallback = focusCallback
+
+    // Set up prompt store callbacks
+    promptStore.setResponseCallback(submitPromptResponse)
+    promptStore.setDisconnectCallback(() => this.closeConnection())
+
     debug('Socket service initialized')
   }
 
   // Set form data for authentication
   setFormData(formData: Partial<ClientAuthenticatePayload>): void {
-    storedFormData = formData
-    debug('Form data stored', { port: formData.port })
+    storedFormData = sanitizeClientAuthPayload(formData)
+    debug('Form data stored', { port: storedFormData.port })
   }
 
   // Initialize socket connection
@@ -173,6 +189,12 @@ export class SocketService {
     }) as Socket<ServerToClientEvents, ClientToServerEvents>
 
     setSocket(newSocket)
+
+    // Expose socket to window for E2E testing
+    if (typeof window !== 'undefined') {
+      window.webssh2Socket = newSocket
+    }
+
     this.setupSocketListeners(newSocket)
     return newSocket
   }
@@ -268,13 +290,15 @@ export class SocketService {
 
     // Start with reactive credentials as base
     const baseCredentials = credentials()
-    const authCredentials = {
+    const mergedCredentials = {
       ...baseCredentials,
       ...(dims.cols && { cols: dims.cols }),
       ...(dims.rows && { rows: dims.rows }),
       // Merge all form data if available
       ...(effectiveFormData && effectiveFormData)
     }
+
+    const authCredentials = sanitizeClientAuthPayload(mergedCredentials)
 
     setState('term', authCredentials.term ?? null)
     const maskedContent = maskObject(authCredentials)
@@ -283,8 +307,10 @@ export class SocketService {
       host: authCredentials.host,
       username: authCredentials.username,
       hasSocket: !!socket(),
-      effectiveFormData,
-      baseCredentials
+      effectiveFormData: effectiveFormData
+        ? sanitizeClientAuthPayload(effectiveFormData)
+        : null,
+      baseCredentials: sanitizeClientAuthPayload(baseCredentials)
     })
 
     const currentSocket = socket()
@@ -385,6 +411,15 @@ export class SocketService {
             break
           }
         }
+      })
+    })
+
+    // SFTP status event - indicates if SFTP is available
+    socketInstance.on('sftp-status', (status) => {
+      debug('SFTP status', status)
+      // Import sftpStore dynamically to avoid circular dependency
+      import('../stores/sftp-store.js').then(({ sftpStore }) => {
+        sftpStore.setStatus(status)
       })
     })
 
@@ -535,6 +570,16 @@ export class SocketService {
           break
       }
     })
+
+    // Prompt events (generic prompt system)
+    socketInstance.on('prompt', (payload: PromptPayload) => {
+      debug('Prompt received', payload)
+      if (payload.type === 'toast') {
+        promptStore.addToast(payload)
+      } else {
+        promptStore.showPrompt(payload)
+      }
+    })
   }
 
   private handleAuthResult(result: {
@@ -599,6 +644,7 @@ export const replayCredentials = () => socketService.replayCredentials()
 export const submitPromptResponses = (responses: string[]) =>
   socketService.submitPromptResponses(responses)
 
+<<<<<<< HEAD
 
 //НАШЕ
 // === Глобальные объекты для внешнего доступа ===
@@ -654,3 +700,15 @@ window.addEventListener('message', function (event) {
 
 // Сообщение родителю что iframe загрузился
 window.parent.postMessage("iframeLoaded", "*");
+=======
+/**
+ * Submit a generic prompt response to the server
+ */
+export const submitPromptResponse = (response: PromptResponsePayload): void => {
+  const currentSocket = socket()
+  if (currentSocket !== null) {
+    debug('Submitting prompt response', response.id, response.action)
+    currentSocket.emit('prompt-response', response)
+  }
+}
+>>>>>>> eb88985a6e81bb6848e45e6541792615f989caa5

@@ -3,11 +3,13 @@ import { createSignal, onMount, onCleanup, Show, createEffect } from 'solid-js'
 import createDebug from 'debug'
 
 // Import existing utilities and types
-import type { WebSSH2Config } from './types/config.d'
+import type { WebSSH2Config, TerminalSettings } from './types/config.d'
 import {
   initializeConfig,
   initializeUrlParams,
-  configWithUrlOverrides
+  configWithUrlOverrides,
+  allowedAuthMethods,
+  sanitizeClientAuthPayload
 } from './stores/config.js'
 import { getBasicAuthCookie } from './utils/cookies.js'
 import {
@@ -55,15 +57,21 @@ import { ErrorModal, PromptModal } from './components/Modal'
 import { TerminalSettingsModal } from './components/TerminalSettingsModal'
 import { MenuDropdown } from './components/MenuDropdown'
 import { TerminalSearch } from './components/TerminalSearch'
+import { FileBrowser } from './components/sftp/index.js'
+import { UniversalPrompt, ToastContainer } from './components/prompts'
+import { sftpStore } from './stores/sftp-store.js'
+import { promptStore } from './stores/prompt-store.js'
 
 // Import socket service
 import {
   socketService,
   setTerminalDimensions,
   submitPromptResponses,
+  submitPromptResponse,
   connectionStatus,
   connectionStatusColor
 } from './services/socket.js'
+import { loadServerAuthMethods } from './services/config.js'
 
 // Import types
 import type { ClientAuthenticatePayload } from './types/events.d'
@@ -72,6 +80,9 @@ import type { ITerminalOptions } from '@xterm/xterm'
 
 // Import utilities
 import { getSearchShortcut, matchesShortcut } from './utils/os-detection'
+import { shouldCaptureKey } from './utils/keyboard-capture'
+import { getStoredSettings } from './utils/settings'
+import { defaultSettings } from './utils/index'
 
 // Import CSS
 import './app.css'
@@ -82,6 +93,7 @@ const App: Component = () => {
   const [config, setConfig] = createSignal<WebSSH2Config>()
   const [_isTerminalVisible, setIsTerminalVisible] = createSignal(false)
   const [terminalActions, setTerminalActions] = createSignal<TerminalActions>()
+  const [authMethodLoadFailed, setAuthMethodLoadFailed] = createSignal(false)
 
   let terminalRef: TerminalRef | undefined
 
@@ -98,6 +110,11 @@ const App: Component = () => {
       // Initialize reactive config and URL params
       initializeConfig()
       const cleanupUrlListener = initializeUrlParams()
+      const serverConfigResult = await loadServerAuthMethods()
+      if (!serverConfigResult.ok) {
+        debug('Server config load failed, using fallback auth methods')
+        setAuthMethodLoadFailed(true)
+      }
 
       // Handle cleanup on component unmount
       onCleanup(() => cleanupUrlListener())
@@ -131,6 +148,12 @@ const App: Component = () => {
         focusTerminal
       )
 
+      // Set up prompt store error callback (for circuit breaker)
+      promptStore.setShowErrorCallback((message: string) => {
+        setErrorMessage(message)
+        setIsErrorDialogOpen(true)
+      })
+
       // Set up reactive effects within the SolidJS context
       socketService.setupReactiveEffects()
 
@@ -138,7 +161,9 @@ const App: Component = () => {
       checkSavedLog()
 
       // Initialize loggedData state based on localStorage
-      const hasSessionLog = window.localStorage.getItem('webssh2_session_log')
+      const hasSessionLog = globalThis.localStorage.getItem(
+        'webssh2_session_log'
+      )
       setState('loggedData', !!hasSessionLog)
       debug('Initialized loggedData state:', !!hasSessionLog)
 
@@ -158,6 +183,16 @@ const App: Component = () => {
   // Set up global keyboard shortcuts
   onMount(() => {
     const handleKeydown = (event: KeyboardEvent) => {
+      // Check if this key should be captured by the terminal
+      const storedSettings = getStoredSettings() as Partial<TerminalSettings>
+      const keyboardCaptureSettings =
+        storedSettings.keyboardCapture || defaultSettings.keyboardCapture
+
+      if (shouldCaptureKey(event, keyboardCaptureSettings)) {
+        // Key should be captured by terminal, don't handle it here
+        return
+      }
+
       const searchShortcut = getSearchShortcut()
 
       // Check if this matches our search shortcut
@@ -227,6 +262,10 @@ const App: Component = () => {
 
   const onDisconnect = (reason: string, details?: unknown) => {
     debug('Disconnected:', reason)
+
+    // Always reset SFTP state on disconnect - the session is no longer valid
+    sftpStore.reset()
+
     switch (reason) {
       case 'auth_required':
       case 'auth_failed':
@@ -239,16 +278,18 @@ const App: Component = () => {
         break
       case 'error':
       case 'ssh_error':
-        if (!state.reauthRequired) {
-          setErrorMessage(`${String(details || reason)}`)
+        if (state.reauthRequired) {
+          setState('reauthRequired', false)
+        } else {
+          setErrorMessage(typeof details === 'string' ? details : reason)
           setIsErrorDialogOpen(true)
           commonPostDisconnectTasks()
-        } else {
-          setState('reauthRequired', false)
         }
         break
       default:
-        setErrorMessage(`Disconnected: ${String(details || reason)}`)
+        setErrorMessage(
+          `Disconnected: ${typeof details === 'string' ? details : reason}`
+        )
         setIsErrorDialogOpen(true)
         commonPostDisconnectTasks()
         break
@@ -385,6 +426,14 @@ const App: Component = () => {
     setIsSearchVisible(!isSearchVisible())
   }
 
+  const handleFileBrowser = () => {
+    if (sftpStore.isOpen) {
+      sftpStore.close()
+    } else {
+      sftpStore.open()
+    }
+  }
+
   // Utility functions
   const connectToServer = (formData?: Partial<ClientAuthenticatePayload>) => {
     debug('Connecting to server')
@@ -405,7 +454,10 @@ const App: Component = () => {
     }
 
     setState('isConnecting', true)
-    if (formData) socketService.setFormData(formData)
+    const sanitizedFormData = formData
+      ? sanitizeClientAuthPayload(formData)
+      : undefined
+    if (sanitizedFormData) socketService.setFormData(sanitizedFormData)
     socketService.initializeSocketConnection()
 
     // Show terminal - header will be set by server via updateUI events
@@ -481,6 +533,8 @@ const App: Component = () => {
               ) as Partial<ClientAuthenticatePayload>)
             : undefined
         }
+        allowedAuthMethods={allowedAuthMethods()}
+        authMethodLoadFailed={authMethodLoadFailed()}
       />
 
       <ErrorModal
@@ -514,6 +568,27 @@ const App: Component = () => {
         >
           Reconnect
         </button>
+      </Show>
+
+      {/* Toast notifications (always rendered) */}
+      <ToastContainer />
+
+      {/* Universal prompts (conditionally rendered) */}
+      <Show when={promptStore.activePrompt !== null}>
+        <UniversalPrompt
+          prompt={promptStore.activePrompt!}
+          onResponse={(response) => {
+            submitPromptResponse(response)
+            promptStore.dismissPrompt(
+              response.id,
+              response.action,
+              response.inputs
+            )
+          }}
+          onDismiss={() =>
+            promptStore.dismissPrompt(promptStore.activePrompt!.id)
+          }
+        />
       </Show>
 
       {/* Main Container */}
@@ -551,10 +626,10 @@ const App: Component = () => {
                 const styles: Record<string, string> = {}
                 if (header.fullStyle.includes('background')) {
                   // Simple regex to extract background-color or background
-                  const bgMatch = header.fullStyle.match(
-                    /background(?:-color)?:\s*([^;]+)/i
+                  const bgMatch = /background(?:-color)?:\s*([^;]+)/i.exec(
+                    header.fullStyle
                   )
-                  if (bgMatch && bgMatch[1]) {
+                  if (bgMatch?.[1]) {
                     styles['background-color'] = bgMatch[1].trim()
                   }
                 }
@@ -593,6 +668,9 @@ const App: Component = () => {
           </div>
         </Show>
 
+        {/* SFTP File Browser */}
+        <FileBrowser />
+
         {/* Bottom Bar */}
         <div class="z-[99] flex h-6 shrink-0 items-center border-t border-neutral-200 bg-neutral-800 text-neutral-100">
           {/* Menu */}
@@ -605,17 +683,15 @@ const App: Component = () => {
             onReauth={handleReauth}
             onTerminalSettings={() => setIsTerminalSettingsOpen(true)}
             onSearch={handleSearch}
+            onFileBrowser={handleFileBrowser}
           />
 
           {/* Footer and Status */}
           <div class="inline-block border-l border-neutral-200 px-[10px] text-left">
             {sessionFooter()}
           </div>
-          <div
+          <output
             id="status"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
             class={`z-[100] inline-block border-x border-neutral-200 px-[10px] text-left text-white ${(() => {
               const color = connectionStatusColor()
               if (color === 'green') return 'bg-green-700'
@@ -625,7 +701,7 @@ const App: Component = () => {
             })()}`}
           >
             {connectionStatus()}
-          </div>
+          </output>
         </div>
       </div>
     </div>

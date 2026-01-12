@@ -2,6 +2,60 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [3.0.0](https://github.com/billchurch/webssh2_client/compare/v2.4.1...v3.0.0) (2025-12-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sftp:** Requires updated server that generates transfer IDs.
+
+### Features
+
+* **sftp:** use server-generated transfer IDs ([#79](https://github.com/billchurch/webssh2_client/issues/79)) ([1cd8138](https://github.com/billchurch/webssh2_client/commit/1cd81382b30fe966936e01fc41c51053536486f1))
+
+## [2.4.1](https://github.com/billchurch/webssh2_client/compare/v2.4.0...v2.4.1) (2025-12-18)
+
+
+### Bug Fixes
+
+* terminal bell sound ([#76](https://github.com/billchurch/webssh2_client/issues/76)) ([3153310](https://github.com/billchurch/webssh2_client/commit/31533101fd27a69bfec5ccdb55f519240edcb7f0))
+* update release-please to skip malformed commit [skip ci] ([186d46f](https://github.com/billchurch/webssh2_client/commit/186d46f29964736a443b94198a20958532c5b2bb))
+
+## [2.4.0](https://github.com/billchurch/webssh2_client/compare/v2.3.1...v2.4.0) (2025-12-17)
+
+
+### Features
+
+* add generic prompt system for server-driven UI ([#73](https://github.com/billchurch/webssh2_client/issues/73)) ([194c56c](https://github.com/billchurch/webssh2_client/commit/194c56cf912284cce183b9bad748953ab35b0a56))
+
+## [2.3.1](https://github.com/billchurch/webssh2_client/compare/v2.3.0...v2.3.1) (2025-12-03)
+
+
+### Bug Fixes
+
+* update SFTP / file browser components for accessibility ([#69](https://github.com/billchurch/webssh2_client/issues/69)) ([6d3ee06](https://github.com/billchurch/webssh2_client/commit/6d3ee063d8b3ba14f900ae2160502fe2dd7d1551))
+
+## [2.3.0](https://github.com/billchurch/webssh2_client/compare/v2.2.0...v2.3.0) (2025-12-03)
+
+
+### Features
+
+* add SFTP client types and events for file transfer operations ([#67](https://github.com/billchurch/webssh2_client/issues/67)) ([e5a5056](https://github.com/billchurch/webssh2_client/commit/e5a505612ac692b7b3bd5594295a83d482798454))
+
+## [2.2.0](https://github.com/billchurch/webssh2_client/compare/v2.1.0...v2.2.0) (2025-12-01)
+
+
+### Features
+
+* Add keyboard capture configuration for terminal focus ([4432b06](https://github.com/billchurch/webssh2_client/commit/4432b06ab9e8734a2d2b4e98039797e5d49bd72c))
+
+## [2.1.0](https://github.com/billchurch/webssh2_client/compare/v2.0.0...v2.1.0) (2025-11-06)
+
+
+### Features
+
+* Implement SSH authentication method gating and sanitization ([#60](https://github.com/billchurch/webssh2_client/issues/60)) ([8d1174b](https://github.com/billchurch/webssh2_client/commit/8d1174b7b1670bf575889c34ae4532f199599470))
+
 ## [2.0.0](https://github.com/billchurch/webssh2_client/compare/v2.0.0...v2.0.0) (2025-09-14)
 
 

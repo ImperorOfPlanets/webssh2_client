@@ -1,5 +1,23 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
+export type SSHAuthMethod = 'password' | 'keyboard-interactive' | 'publickey'
+
+export interface KeyboardCaptureSettings {
+  captureEscape: boolean
+  captureCtrlB: boolean
+  customCaptureKeys: string[]
+}
+
+export interface PromptSoundSettings {
+  enabled: boolean
+  severities: {
+    info: boolean
+    warning: boolean
+    error: boolean
+    success: boolean
+  }
+}
+
 export interface TerminalSettings {
   cursorBlink: boolean
   scrollback: number
@@ -13,6 +31,8 @@ export interface TerminalSettings {
   clipboardAutoSelectToCopy: boolean
   clipboardEnableMiddleClickPaste: boolean
   clipboardEnableKeyboardShortcuts: boolean
+  keyboardCapture: KeyboardCaptureSettings
+  promptSounds: PromptSoundSettings
 }
 
 export interface WebSocketConfig {
@@ -38,6 +58,7 @@ export interface HeaderConfig {
 export interface WebSSH2Config {
   socket: WebSocketConfig
   ssh: SSHConfigInput
+  allowedAuthMethods?: SSHAuthMethod[]
   terminal: TerminalSettings
   header: HeaderConfig
   autoConnect: boolean
