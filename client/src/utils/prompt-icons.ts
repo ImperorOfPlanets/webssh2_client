@@ -16,7 +16,7 @@ import {
   Shield,
   ShieldCheck,
   ShieldAlert,
-  FingerprintPattern,
+  Fingerprint,
   UserCheck,
   UserX,
   File,
@@ -93,7 +93,7 @@ export const PROMPT_ICON_REGISTRY: Record<string, Component<LucideProps>> = {
   Shield,
   ShieldCheck,
   ShieldAlert,
-  FingerprintPattern,
+  Fingerprint,
   UserCheck,
   UserX,
   // File operations

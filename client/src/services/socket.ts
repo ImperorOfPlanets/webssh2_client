@@ -140,18 +140,98 @@ export class SocketService {
     writeFunction: (data: string) => void,
     focusCallback: () => void
   ): void {
-    config = configObj
-    onConnectCallback = connectCallback
-    onDisconnectCallback = disconnectCallback
-    onDataCallback = dataCallback
-    writeToTerminal = writeFunction
-    focusTerminalCallback = focusCallback
+    console.log('[DEBUG INIT] Received config object:', JSON.stringify(configObj, null, 2));
+
+    let fixedConfig = { ...configObj };
+
+    // Debug: check if socket.url exists
+    if (!fixedConfig.socket?.url) {
+      console.log('[DEBUG INIT] No socket.url in config - will use fallback in getWebSocketUrl');
+    } else {
+      console.log('[DEBUG INIT] Original socket URL:', fixedConfig.socket.url);
+      
+      try {
+        const url = new URL(fixedConfig.socket.url);
+        console.log('[DEBUG INIT] Parsed URL details:', {
+          href: url.href,
+          hostname: url.hostname,
+          port: url.port,
+          protocol: url.protocol,
+          pathname: url.pathname
+        });
+
+        // Check if it's localhost without port
+        if (
+          (url.hostname === 'localhost' || url.hostname === '127.0.0.1') &&
+          !url.port
+        ) {
+          console.log('[DEBUG INIT] ✅ Detected localhost without port - attempting fix...');
+          
+          let correctOrigin = 'https://localhost:8444';
+          console.log('[DEBUG INIT] Default correct origin:', correctOrigin);
+          
+          // Try to get origin from referrer
+          if (document.referrer) {
+            console.log('[DEBUG INIT] Document referrer:', document.referrer);
+            try {
+              const ref = new URL(document.referrer);
+              console.log('[DEBUG INIT] Parsed referrer:', {
+                hostname: ref.hostname,
+                protocol: ref.protocol,
+                origin: ref.origin
+              });
+              
+              if (ref.hostname === 'localhost' && ref.protocol === 'https:') {
+                correctOrigin = ref.origin;
+                console.log('[DEBUG INIT] ✅ Using referrer origin:', correctOrigin);
+              } else {
+                console.log('[DEBUG INIT] Referrer not suitable for localhost fix');
+              }
+            } catch (e) {
+              console.warn('[DEBUG INIT] Failed to parse referrer:', e);
+            }
+          } else {
+            console.log('[DEBUG INIT] No document.referrer available');
+          }
+
+          // Build corrected URL
+          const correctedUrl = new URL(url.pathname + url.search, correctOrigin);
+          console.log('[DEBUG INIT] Corrected URL constructed:', correctedUrl.toString());
+          
+          fixedConfig = {
+            ...fixedConfig,
+            socket: {
+              ...fixedConfig.socket,
+              url: correctedUrl.toString()
+            }
+          };
+          console.log('[DEBUG INIT] ✅ Fixed config socket URL:', fixedConfig.socket.url);
+        } else {
+          console.log('[DEBUG INIT] ❌ Condition not met - no fix applied');
+          console.log('[DEBUG INIT] Hostname:', url.hostname);
+          console.log('[DEBUG INIT] Has port:', !!url.port);
+        }
+      } catch (e) {
+        console.error('[DEBUG INIT] ❌ Error while fixing socket URL:', e);
+      }
+    }
+
+    // Save the (possibly fixed) config
+    config = fixedConfig;
+    onConnectCallback = connectCallback;
+    onDisconnectCallback = disconnectCallback;
+    onDataCallback = dataCallback;
+    writeToTerminal = writeFunction;
+    focusTerminalCallback = focusCallback;
 
     // Set up prompt store callbacks
-    promptStore.setResponseCallback(submitPromptResponse)
-    promptStore.setDisconnectCallback(() => this.closeConnection())
+    promptStore.setResponseCallback(submitPromptResponse);
+    promptStore.setDisconnectCallback(() => this.closeConnection());
 
-    debug('Socket service initialized')
+    debug('Socket service initialized with config', {
+      original: configObj.socket?.url,
+      final: config?.socket?.url
+    });
   }
 
   // Set form data for authentication
@@ -274,6 +354,7 @@ export class SocketService {
     if (config?.socket?.url) {
       const url = new URL(config.socket.url)
       url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      console.log('[SOCKET] Final URL from fixed config:', url.toString());
       return url.toString()
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -644,8 +725,6 @@ export const replayCredentials = () => socketService.replayCredentials()
 export const submitPromptResponses = (responses: string[]) =>
   socketService.submitPromptResponses(responses)
 
-<<<<<<< HEAD
-
 //НАШЕ
 // === Глобальные объекты для внешнего доступа ===
 (window as any).webssh2API = {
@@ -700,7 +779,7 @@ window.addEventListener('message', function (event) {
 
 // Сообщение родителю что iframe загрузился
 window.parent.postMessage("iframeLoaded", "*");
-=======
+
 /**
  * Submit a generic prompt response to the server
  */
@@ -711,4 +790,3 @@ export const submitPromptResponse = (response: PromptResponsePayload): void => {
     currentSocket.emit('prompt-response', response)
   }
 }
->>>>>>> eb88985a6e81bb6848e45e6541792615f989caa5
