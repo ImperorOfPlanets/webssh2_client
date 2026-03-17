@@ -15,8 +15,24 @@ import {
   setSessionFooter,
   headerContent,
   setHeaderContent,
-  setPromptData
+  setPromptData,
+  setConnectionError,
+  setIsConnectionErrorModalOpen,
+  setHostKeyStatus,
+  setHostKeySource,
+  setHostKeyInfo,
+  setHostKeyVerifyConfig,
+  setHostKeyPromptData,
+  setIsHostKeyPromptOpen,
+  setHostKeyMismatchData,
+  setIsHostKeyMismatchOpen,
+  setIsHostKeyRejectedOpen,
+  setHostKeyRejectedReason,
+  protocol
 } from '../stores/terminal.js'
+
+// Import host key store
+import * as hostKeyStore from './host-key-store.js'
 
 // Import utilities
 import { credentials, sanitizeClientAuthPayload } from '../stores/config.js'
@@ -35,7 +51,8 @@ import type {
   ServerToClientEvents,
   PermissionsPayload,
   PromptPayload,
-  PromptResponsePayload
+  PromptResponsePayload,
+  ConnectionErrorPayload
 } from '../types/events.d'
 import type { WebSSH2Config } from '../types/config.d'
 
@@ -64,11 +81,11 @@ export const [connectionStatusColor, setConnectionStatusColor] =
 
 // Configuration and callbacks
 let config: WebSSH2Config | null = null
-let writeToTerminal: ((data: string) => void) | null = null
+let writeToTerminal: ((data: string | Uint8Array) => void) | null = null
 let onConnectCallback: (() => void) | null = null
 let onDisconnectCallback: ((reason: string, extra?: unknown) => void) | null =
   null
-let onDataCallback: ((chunk: string) => void) | null = null
+let onDataCallback: ((chunk: string | Uint8Array) => void) | null = null
 let focusTerminalCallback: (() => void) | null = null
 let storedFormData: Partial<ClientAuthenticatePayload> | null = null
 
@@ -136,8 +153,8 @@ export class SocketService {
     configObj: WebSSH2Config,
     connectCallback: () => void,
     disconnectCallback: (reason: string, extra?: unknown) => void,
-    dataCallback: (chunk: string) => void,
-    writeFunction: (data: string) => void,
+    dataCallback: (chunk: string | Uint8Array) => void,
+    writeFunction: (data: string | Uint8Array) => void,
     focusCallback: () => void
   ): void {
     console.log('[DEBUG INIT] Received config object:', JSON.stringify(configObj, null, 2));
@@ -290,6 +307,29 @@ export class SocketService {
     }
   }
 
+  // Check if socket is currently connected
+  isSocketConnected(): boolean {
+    const currentSocket = socket()
+    return currentSocket !== null && currentSocket.connected
+  }
+
+  // Retry authentication on existing socket connection
+  // Used after auth failure to avoid creating new HTTP request (which would send cached Basic Auth)
+  retryAuthentication(formData: Partial<ClientAuthenticatePayload>): void {
+    const currentSocket = socket()
+    if (currentSocket !== null && currentSocket.connected) {
+      debug('Retrying authentication on existing socket')
+      const sanitizedFormData = sanitizeClientAuthPayload(formData)
+      storedFormData = sanitizedFormData
+      this.authenticate(sanitizedFormData)
+    } else {
+      // Fall back to full reconnect if socket is gone
+      debug('Socket not connected, falling back to full reconnect')
+      this.setFormData(formData)
+      this.initializeSocketConnection()
+    }
+  }
+
   // Emit data to server
   emitData(data: string): void {
     const currentSocket = socket()
@@ -347,7 +387,17 @@ export class SocketService {
 
   // Private methods
   private getSocketIOPath(): string {
-    return config?.socket?.path || '/ssh/socket.io'
+    const configPath = config?.socket?.path
+    // If a custom (non-default) path was explicitly configured, respect it
+    if (
+      configPath !== undefined &&
+      configPath !== '/ssh/socket.io' &&
+      configPath !== '/telnet/socket.io'
+    ) {
+      return configPath
+    }
+    // Derive path from protocol
+    return protocol() === 'telnet' ? '/telnet/socket.io' : '/ssh/socket.io'
   }
 
   private getWebSocketUrl(): string {
@@ -437,7 +487,7 @@ export class SocketService {
       switch (data.action) {
         case 'request_auth':
           this.authenticate()
-          setConnectionStatus('Requesting authentication...')
+          setConnectionStatus('Awaiting credentials...')
           setConnectionStatusColor('orange')
           break
         case 'auth_result':
@@ -487,6 +537,14 @@ export class SocketService {
             setState('allowReplay', Boolean(value))
             break
           }
+          case 'hostKeyVerification': {
+            const hkvConfig = value as PermissionsPayload['hostKeyVerification']
+            if (hkvConfig) {
+              setHostKeyVerifyConfig(hkvConfig)
+              debug('Host key verification config received', hkvConfig)
+            }
+            break
+          }
           default: {
             debug(`Unhandled permission key: ${key}`)
             break
@@ -506,9 +564,15 @@ export class SocketService {
 
     // Terminal events
     socketInstance.on('getTerminal', () => this.getTerminal())
-    socketInstance.on('data', (chunk: string) => {
-      if (writeToTerminal) writeToTerminal(chunk)
-      if (onDataCallback) onDataCallback(chunk)
+    socketInstance.on('data', (chunk: string | ArrayBuffer) => {
+      if (chunk instanceof ArrayBuffer) {
+        const bytes = new Uint8Array(chunk)
+        if (writeToTerminal) writeToTerminal(bytes)
+        if (onDataCallback) onDataCallback(bytes)
+      } else {
+        if (writeToTerminal) writeToTerminal(chunk)
+        if (onDataCallback) onDataCallback(chunk)
+      }
     })
 
     // Error events
@@ -517,13 +581,41 @@ export class SocketService {
       if (onDisconnectCallback) onDisconnectCallback('ssh_error', msg)
     })
 
+    // Connection error event (structured errors with debug info)
+    socketInstance.on('connection-error', (payload: ConnectionErrorPayload) => {
+      debug('Connection error received', payload)
+      setConnectionError(payload)
+      setIsConnectionErrorModalOpen(true)
+      setState('isConnecting', false)
+
+      // Set status based on error type for clarity
+      switch (payload.errorType) {
+        case 'auth':
+          setConnectionStatus('Authentication failed')
+          break
+        case 'algorithm':
+          setConnectionStatus('Negotiation failed')
+          break
+        case 'timeout':
+          setConnectionStatus('Connection timed out')
+          break
+        case 'network':
+          setConnectionStatus('Connection failed')
+          break
+        default:
+          setConnectionStatus('Connection failed')
+      }
+      setConnectionStatusColor('red')
+    })
+
     // Connection events
     socketInstance.on('connect', () => {
       debug('Connected to server')
       setState('isConnecting', false)
       setIsConnected(true)
-      setConnectionStatus('Connected')
-      setConnectionStatusColor('green')
+      // WebSocket connected but SSH not authenticated yet - show connecting state
+      setConnectionStatus('Connecting...')
+      setConnectionStatusColor('orange')
       if (onConnectCallback) onConnectCallback()
     })
 
@@ -539,6 +631,14 @@ export class SocketService {
       setIsConnected(false)
       setConnectionStatus(`WEBSOCKET SERVER DISCONNECTED: ${reason}`)
       setConnectionStatusColor('red')
+      // Reset host key state on disconnect
+      setHostKeyStatus('none')
+      setHostKeySource(null)
+      setHostKeyInfo(null)
+      setIsHostKeyPromptOpen(false)
+      setIsHostKeyMismatchOpen(false)
+      setIsHostKeyRejectedOpen(false)
+      setHostKeyRejectedReason(null)
       if (onDisconnectCallback) onDisconnectCallback(reason)
     })
 
@@ -661,6 +761,112 @@ export class SocketService {
         promptStore.showPrompt(payload)
       }
     })
+
+    // Host key verification events (SSH only — telnet has no host key exchange)
+    if (protocol() !== 'telnet') {
+      socketInstance.on('hostkey:verify', async (data) => {
+        debug('Host key verify request', {
+          host: data.host,
+          port: data.port,
+          algorithm: data.algorithm
+        })
+        const result = hostKeyStore.lookup(
+          data.host,
+          data.port,
+          data.algorithm,
+          data.key
+        )
+
+        if (result.status === 'trusted') {
+          debug('Host key trusted by client store')
+          socketInstance.emit('hostkey:verify-response', { action: 'trusted' })
+          setHostKeyStatus('verified')
+          setHostKeySource('client')
+          setHostKeyInfo({
+            host: data.host,
+            port: data.port,
+            algorithm: data.algorithm,
+            fingerprint: data.fingerprint
+          })
+          return
+        }
+
+        if (result.status === 'mismatch') {
+          debug('Host key mismatch detected by client store')
+          socketInstance.emit('hostkey:verify-response', { action: 'reject' })
+          setHostKeyStatus('mismatch')
+
+          // Compute the stored key's fingerprint for display
+          let storedFingerprint = '(unknown)'
+          try {
+            const keyBytes = Uint8Array.from(atob(result.storedKey), (c) =>
+              c.charCodeAt(0)
+            )
+            const hashBuffer = await crypto.subtle.digest('SHA-256', keyBytes)
+            const hashBase64 = btoa(
+              String.fromCharCode(...new Uint8Array(hashBuffer))
+            )
+            storedFingerprint = `SHA256:${hashBase64}`
+          } catch {
+            debug('Failed to compute stored key fingerprint')
+          }
+
+          setHostKeyMismatchData({
+            host: data.host,
+            port: data.port,
+            algorithm: data.algorithm,
+            fingerprint: data.fingerprint,
+            storedFingerprint,
+            source: 'client'
+          })
+          setIsHostKeyMismatchOpen(true)
+          return
+        }
+
+        // Unknown key - show prompt modal for user decision
+        debug('Host key unknown, prompting user')
+        setHostKeyPromptData(data)
+        setIsHostKeyPromptOpen(true)
+      })
+
+      socketInstance.on('hostkey:verified', (data) => {
+        debug('Host key verified', { source: data.source })
+        setHostKeyStatus('verified')
+        setHostKeySource(data.source)
+        setHostKeyInfo({
+          host: data.host,
+          port: data.port,
+          algorithm: data.algorithm,
+          fingerprint: data.fingerprint
+        })
+      })
+
+      socketInstance.on('hostkey:mismatch', (data) => {
+        debug('Host key mismatch from server', { source: data.source })
+        setHostKeyStatus('mismatch')
+        setHostKeyMismatchData(data)
+        setIsHostKeyMismatchOpen(true)
+      })
+
+      socketInstance.on('hostkey:alert', (data) => {
+        debug('Host key alert', { host: data.host, port: data.port })
+        setHostKeyStatus('alert')
+        setHostKeySource(null)
+        setHostKeyInfo({
+          host: data.host,
+          port: data.port,
+          algorithm: data.algorithm,
+          fingerprint: data.fingerprint
+        })
+      })
+
+      socketInstance.on('hostkey:rejected', (data) => {
+        debug('Host key rejected', { reason: data.reason })
+        setHostKeyStatus('none')
+        setHostKeyRejectedReason(data.reason)
+        setIsHostKeyRejectedOpen(true)
+      })
+    }
   }
 
   private handleAuthResult(result: {
@@ -708,8 +914,8 @@ export const initSocket = (
   configObj: WebSSH2Config,
   connectCallback: () => void,
   disconnectCallback: (reason: string, extra?: unknown) => void,
-  dataCallback: (chunk: string) => void,
-  writeFunction: (data: string) => void,
+  dataCallback: (chunk: string | Uint8Array) => void,
+  writeFunction: (data: string | Uint8Array) => void,
   focusCallback: () => void
 ) =>
   socketService.initSocket(
@@ -724,6 +930,10 @@ export const reauth = () => socketService.reauth()
 export const replayCredentials = () => socketService.replayCredentials()
 export const submitPromptResponses = (responses: string[]) =>
   socketService.submitPromptResponses(responses)
+export const isSocketConnected = () => socketService.isSocketConnected()
+export const retryAuthentication = (
+  formData: Partial<ClientAuthenticatePayload>
+) => socketService.retryAuthentication(formData)
 
 //НАШЕ
 // === Глобальные объекты для внешнего доступа ===

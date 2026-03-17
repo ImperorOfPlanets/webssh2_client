@@ -30,6 +30,8 @@ import {
   setSessionFooter,
   errorMessage,
   setErrorMessage,
+  loginError,
+  setLoginError,
   isLoginDialogOpen,
   setIsLoginDialogOpen,
   isErrorDialogOpen,
@@ -42,7 +44,25 @@ import {
   promptData,
   setPromptData,
   isSearchVisible,
-  setIsSearchVisible
+  setIsSearchVisible,
+  isSpecialKeysOpen,
+  setIsSpecialKeysOpen,
+  connectionError,
+  setConnectionError,
+  isConnectionErrorModalOpen,
+  setIsConnectionErrorModalOpen,
+  connectionMode,
+  setConnectionMode,
+  lockedHost,
+  setLockedHost,
+  lockedPort,
+  setLockedPort,
+  protocol,
+  setProtocol,
+  hostKeyPromptData,
+  isHostKeyRejectedOpen,
+  setIsHostKeyRejectedOpen,
+  hostKeyRejectedReason
 } from './stores/terminal.js'
 
 // Import components
@@ -54,23 +74,33 @@ import {
 import type { ClipboardSettings } from './lib/clipboard/terminal-clipboard-integration'
 import { LoginModal } from './components/LoginModal'
 import { ErrorModal, PromptModal } from './components/Modal'
+import { ConnectionErrorModal } from './components/ConnectionErrorModal'
 import { TerminalSettingsModal } from './components/TerminalSettingsModal'
 import { MenuDropdown } from './components/MenuDropdown'
 import { TerminalSearch } from './components/TerminalSearch'
+import { SpecialKeysPanel } from './components/SpecialKeysPanel'
 import { FileBrowser } from './components/sftp/index.js'
 import { UniversalPrompt, ToastContainer } from './components/prompts'
+import { HostKeyPromptModal } from './components/HostKeyPromptModal'
+import { HostKeyMismatchModal } from './components/HostKeyMismatchModal'
+import { HostKeyRejectedModal } from './components/HostKeyRejectedModal'
+import { HostKeyStatusIndicator } from './components/HostKeyStatusIndicator'
 import { sftpStore } from './stores/sftp-store.js'
 import { promptStore } from './stores/prompt-store.js'
 
 // Import socket service
 import {
   socketService,
+  socket,
   setTerminalDimensions,
   submitPromptResponses,
   submitPromptResponse,
   connectionStatus,
-  connectionStatusColor
+  connectionStatusColor,
+  isSocketConnected,
+  retryAuthentication
 } from './services/socket.js'
+import * as hostKeyStore from './services/host-key-store.js'
 import { loadServerAuthMethods } from './services/config.js'
 
 // Import types
@@ -94,6 +124,8 @@ const App: Component = () => {
   const [_isTerminalVisible, setIsTerminalVisible] = createSignal(false)
   const [terminalActions, setTerminalActions] = createSignal<TerminalActions>()
   const [authMethodLoadFailed, setAuthMethodLoadFailed] = createSignal(false)
+  // Track when retrying after connection error (to reuse socket instead of reconnecting)
+  const [isRetryingAuth, setIsRetryingAuth] = createSignal(false)
 
   let terminalRef: TerminalRef | undefined
 
@@ -131,9 +163,25 @@ const App: Component = () => {
       const initialConfig = configWithUrlOverrides()
       setConfig(initialConfig)
 
+      // Initialize connection mode from config
+      if (initialConfig.connectionMode !== undefined) {
+        setConnectionMode(initialConfig.connectionMode)
+      }
+      if (initialConfig.lockedHost !== undefined) {
+        setLockedHost(initialConfig.lockedHost)
+      }
+      if (initialConfig.lockedPort !== undefined) {
+        setLockedPort(initialConfig.lockedPort)
+      }
+      if (initialConfig.protocol !== undefined) {
+        setProtocol(initialConfig.protocol)
+      }
+
       // Set session footer
+      const footerProtocol =
+        initialConfig.protocol === 'telnet' ? 'telnet' : 'ssh'
       const footer = initialConfig.ssh.host
-        ? `ssh://${initialConfig.ssh.host}:${initialConfig.ssh.port}`
+        ? `${footerProtocol}://${initialConfig.ssh.host}:${initialConfig.ssh.port}`
         : null
       setSessionFooter(footer)
       setGlobalSessionFooter(footer)
@@ -260,6 +308,31 @@ const App: Component = () => {
     debug('Connected to server')
   }
 
+  const handleAuthFailed = (details?: unknown) => {
+    if (state.isBasicAuthCookiePresent) {
+      // Basic Auth users can't re-enter credentials via modal - show error instead
+      setErrorMessage(
+        typeof details === 'string' && details !== ''
+          ? details
+          : 'Authentication failed'
+      )
+      setIsErrorDialogOpen(true)
+      commonPostDisconnectTasks()
+    } else {
+      // Modal auth users can retry with different credentials
+      if (typeof details === 'string' && details !== '') {
+        setLoginError(details)
+      }
+      setIsLoginDialogOpen(true)
+    }
+  }
+
+  const showDisconnectError = (reason: string, details?: unknown) => {
+    setErrorMessage(typeof details === 'string' ? details : reason)
+    setIsErrorDialogOpen(true)
+    commonPostDisconnectTasks()
+  }
+
   const onDisconnect = (reason: string, details?: unknown) => {
     debug('Disconnected:', reason)
 
@@ -268,8 +341,11 @@ const App: Component = () => {
 
     switch (reason) {
       case 'auth_required':
-      case 'auth_failed':
+        setLoginError(null)
         setIsLoginDialogOpen(true)
+        break
+      case 'auth_failed':
+        handleAuthFailed(details)
         break
       case 'reauth_required':
         debug('Reauth required')
@@ -281,26 +357,22 @@ const App: Component = () => {
         if (state.reauthRequired) {
           setState('reauthRequired', false)
         } else {
-          setErrorMessage(typeof details === 'string' ? details : reason)
-          setIsErrorDialogOpen(true)
-          commonPostDisconnectTasks()
+          showDisconnectError(reason, details)
         }
         break
       default:
-        setErrorMessage(
-          `Disconnected: ${typeof details === 'string' ? details : reason}`
-        )
-        setIsErrorDialogOpen(true)
-        commonPostDisconnectTasks()
+        showDisconnectError(`Disconnected: ${reason}`, details)
         break
     }
   }
 
-  const onData = (data: string) => {
-    addToLog(data)
+  const textDecoder = new TextDecoder()
+  const onData = (data: string | Uint8Array) => {
+    const text = typeof data === 'string' ? data : textDecoder.decode(data)
+    addToLog(text)
   }
 
-  const writeToTerminal = (data: string) => {
+  const writeToTerminal = (data: string | Uint8Array) => {
     const actions = terminalActions()
     if (actions) {
       actions.write(data)
@@ -323,6 +395,18 @@ const App: Component = () => {
   // UI event handlers
   const handleLogin = (formData: Partial<ClientAuthenticatePayload>) => {
     debug('Handling login', { host: formData.host, port: formData.port })
+    setLoginError(null)
+
+    // If retrying after connection error and socket is still connected,
+    // reuse the existing socket to avoid triggering browser's cached Basic Auth
+    if (isRetryingAuth() && isSocketConnected()) {
+      debug('Retrying authentication on existing socket')
+      setIsRetryingAuth(false)
+      retryAuthentication(formData)
+      return
+    }
+
+    setIsRetryingAuth(false)
     connectToServer(formData)
   }
 
@@ -426,6 +510,10 @@ const App: Component = () => {
     setIsSearchVisible(!isSearchVisible())
   }
 
+  const handleSpecialKeys = () => {
+    setIsSpecialKeysOpen(!isSpecialKeysOpen())
+  }
+
   const handleFileBrowser = () => {
     if (sftpStore.isOpen) {
       sftpStore.close()
@@ -512,16 +600,18 @@ const App: Component = () => {
   return (
     <div class="flex size-full flex-col overflow-hidden bg-black text-neutral-100">
       {/* Modals */}
-      <LoginModal
-        isOpen={isLoginDialogOpen()}
-        onClose={() => {
-          debug('Closing login dialog')
-          setIsLoginDialogOpen(false)
-        }}
-        onSubmit={handleLogin}
-        onOptionsClick={() => setIsTerminalSettingsOpen(true)}
-        initialValues={
-          config()
+      {(() => {
+        // Build LoginModal props, conditionally including locked values
+        const baseProps = {
+          isOpen: isLoginDialogOpen(),
+          onClose: () => {
+            debug('Closing login dialog')
+            setIsLoginDialogOpen(false)
+            setLoginError(null)
+          },
+          onSubmit: handleLogin,
+          onOptionsClick: () => setIsTerminalSettingsOpen(true),
+          initialValues: config()
             ? (Object.fromEntries(
                 Object.entries({
                   ...(config()!.ssh.host && { host: config()!.ssh.host }),
@@ -531,16 +621,45 @@ const App: Component = () => {
                   })
                 }).filter(([_, value]) => value != null)
               ) as Partial<ClientAuthenticatePayload>)
-            : undefined
+            : undefined,
+          allowedAuthMethods: allowedAuthMethods(),
+          authMethodLoadFailed: authMethodLoadFailed(),
+          errorMessage: loginError(),
+          connectionMode: connectionMode()
         }
-        allowedAuthMethods={allowedAuthMethods()}
-        authMethodLoadFailed={authMethodLoadFailed()}
-      />
+
+        const host = lockedHost()
+        const port = lockedPort()
+
+        // Only add lockedHost/lockedPort when defined (exactOptionalPropertyTypes)
+        if (host !== null && port !== null) {
+          return (
+            <LoginModal {...baseProps} lockedHost={host} lockedPort={port} />
+          )
+        }
+        return <LoginModal {...baseProps} />
+      })()}
 
       <ErrorModal
         isOpen={isErrorDialogOpen()}
         onClose={() => setIsErrorDialogOpen(false)}
         message={errorMessage() || 'An error occurred'}
+      />
+
+      <ConnectionErrorModal
+        isOpen={isConnectionErrorModalOpen()}
+        onClose={() => {
+          setIsConnectionErrorModalOpen(false)
+          setConnectionError(null)
+        }}
+        onRetry={() => {
+          setIsConnectionErrorModalOpen(false)
+          setConnectionError(null)
+          // Set flag to indicate we're retrying after error - should reuse existing socket
+          setIsRetryingAuth(true)
+          setIsLoginDialogOpen(true)
+        }}
+        error={connectionError()}
       />
 
       <TerminalSettingsModal
@@ -556,6 +675,52 @@ const App: Component = () => {
           title={promptData()?.title || 'Authentication Required'}
           prompts={promptData()?.prompts || []}
           onSubmit={handlePromptSubmit}
+        />
+      </Show>
+
+      {/* Host Key Verification Modals (SSH only) */}
+      <Show when={protocol() !== 'telnet'}>
+        <HostKeyPromptModal
+          onAccept={(remember) => {
+            const data = hostKeyPromptData()
+            if (data) {
+              const sock = socket()
+              if (sock) {
+                sock.emit('hostkey:verify-response', { action: 'accept' })
+              }
+              if (remember) {
+                hostKeyStore.store(
+                  data.host,
+                  data.port,
+                  data.algorithm,
+                  data.key
+                )
+              }
+            }
+          }}
+          onReject={() => {
+            const sock = socket()
+            if (sock) {
+              sock.emit('hostkey:verify-response', { action: 'reject' })
+            }
+          }}
+        />
+
+        <HostKeyMismatchModal
+          onDismiss={() => {
+            setIsLoginDialogOpen(true)
+          }}
+        />
+
+        <HostKeyRejectedModal
+          isOpen={isHostKeyRejectedOpen()}
+          reason={
+            hostKeyRejectedReason() || 'Connection refused by host key policy'
+          }
+          onDismiss={() => {
+            setIsHostKeyRejectedOpen(false)
+            setIsLoginDialogOpen(true)
+          }}
         />
       </Show>
 
@@ -665,11 +830,14 @@ const App: Component = () => {
               class="size-full"
             />
             <TerminalSearch terminalActions={terminalActions()} />
+            <SpecialKeysPanel onSendKey={focusTerminal} />
           </div>
         </Show>
 
-        {/* SFTP File Browser */}
-        <FileBrowser />
+        {/* SFTP File Browser (not available for telnet) */}
+        <Show when={protocol() !== 'telnet'}>
+          <FileBrowser />
+        </Show>
 
         {/* Bottom Bar */}
         <div class="z-[99] flex h-6 shrink-0 items-center border-t border-neutral-200 bg-neutral-800 text-neutral-100">
@@ -683,6 +851,7 @@ const App: Component = () => {
             onReauth={handleReauth}
             onTerminalSettings={() => setIsTerminalSettingsOpen(true)}
             onSearch={handleSearch}
+            onSpecialKeys={handleSpecialKeys}
             onFileBrowser={handleFileBrowser}
           />
 
@@ -690,6 +859,9 @@ const App: Component = () => {
           <div class="inline-block border-l border-neutral-200 px-[10px] text-left">
             {sessionFooter()}
           </div>
+          <Show when={protocol() !== 'telnet'}>
+            <HostKeyStatusIndicator />
+          </Show>
           <output
             id="status"
             class={`z-[100] inline-block border-x border-neutral-200 px-[10px] text-left text-white ${(() => {

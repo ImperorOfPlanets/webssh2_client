@@ -10,6 +10,68 @@ export type {
   PromptResponsePayload
 } from './prompt'
 
+// =============================================================================
+// Algorithm Types (mirrored from server for client-side display)
+// =============================================================================
+
+/**
+ * Set of algorithms for a specific direction (client or server).
+ * Mirrors the server-side AlgorithmSet type.
+ */
+export interface AlgorithmSet {
+  kex: string[]
+  serverHostKey: string[]
+  cipher: string[]
+  mac: string[]
+  compress: string[]
+}
+
+/**
+ * Analysis result for a single algorithm category
+ */
+export interface CategoryAnalysis {
+  category: keyof AlgorithmSet
+  label: string
+  common: string[]
+  clientOnly: string[]
+  serverOnly: string[]
+  hasMatch: boolean
+}
+
+/**
+ * Complete analysis of algorithm compatibility
+ */
+export interface AlgorithmAnalysis {
+  categories: CategoryAnalysis[]
+  hasAnyMismatch: boolean
+  suggestedPreset: string | null
+  suggestedEnvVars: string[]
+}
+
+/**
+ * Debug information included with connection errors
+ */
+export interface ConnectionErrorDebugInfo {
+  clientAlgorithms?: AlgorithmSet
+  serverAlgorithms?: AlgorithmSet
+  analysis?: AlgorithmAnalysis
+  errorDetails?: string
+}
+
+/**
+ * Payload for connection error events.
+ * Sent by the server when SSH connection fails.
+ */
+export interface ConnectionErrorPayload {
+  errorType: 'network' | 'timeout' | 'auth' | 'algorithm' | 'unknown'
+  title: string
+  message: string
+  host: string
+  port: number
+  canRetry: boolean
+  debugInfo?: ConnectionErrorDebugInfo
+}
+
 export interface AuthenticationRequest {
   action:
     | 'request_auth'
@@ -23,10 +85,15 @@ export interface AuthenticationRequest {
 }
 
 export interface PermissionsPayload {
-  autoLog: boolean
-  allowReplay: boolean
-  allowReconnect: boolean
-  allowReauth: boolean
+  autoLog?: boolean
+  allowReplay?: boolean
+  allowReconnect?: boolean
+  allowReauth?: boolean
+  hostKeyVerification?: {
+    enabled: boolean
+    clientStoreEnabled: boolean
+    unknownKeyAction: string
+  }
 }
 
 // Client → Server
@@ -83,8 +150,9 @@ export interface ServerToClientEvents {
   authentication: (payload: AuthenticationRequest) => void
   permissions: (payload: PermissionsPayload) => void
   getTerminal: () => void
-  data: (chunk: string) => void
+  data: (chunk: string | ArrayBuffer) => void
   ssherror: (message: string) => void
+  'connection-error': (payload: ConnectionErrorPayload) => void
   updateUI: (payload: {
     element: string
     value: string | { text: string; background?: string }
@@ -103,6 +171,36 @@ export interface ServerToClientEvents {
   'sftp-error': (response: SftpErrorResponse) => void
   // Prompt events
   prompt: (payload: PromptPayload) => void
+  // Host key verification events
+  'hostkey:verify': (data: {
+    host: string
+    port: number
+    algorithm: string
+    key: string
+    fingerprint: string
+  }) => void
+  'hostkey:verified': (data: {
+    host: string
+    port: number
+    algorithm: string
+    fingerprint: string
+    source: 'server' | 'client'
+  }) => void
+  'hostkey:mismatch': (data: {
+    host: string
+    port: number
+    algorithm: string
+    fingerprint: string
+    storedFingerprint: string
+    source: 'server' | 'client'
+  }) => void
+  'hostkey:alert': (data: {
+    host: string
+    port: number
+    algorithm: string
+    fingerprint: string
+  }) => void
+  'hostkey:rejected': (data: { reason: string }) => void
 }
 
 export interface ClientToServerEvents {
@@ -127,4 +225,8 @@ export interface ClientToServerEvents {
   'sftp-download-cancel': (request: SftpDownloadCancelRequest) => void
   // Prompt events
   'prompt-response': (response: PromptResponsePayload) => void
+  // Host key verification events
+  'hostkey:verify-response': (data: {
+    action: 'trusted' | 'accept' | 'reject'
+  }) => void
 }
